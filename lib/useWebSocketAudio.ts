@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 interface AudioMessage {
-    type: 'transcription' | 'audio' | 'audio_end' | 'tts_start' | 'tts_interrupted';
+    type: 'stt_final' | 'backend_response' | 'transcription' | 'audio' | 'audio_end' | 'tts_start' | 'tts_interrupted';
     text?: string;
     data?: string;
     emotion?: string;
+    telemetry?: any;
+    actions?: string[];
 }
 
 interface UseWebSocketAudioOptions {
     wsUrl?: string;
     onTranscription?: (text: string) => void;
+    onBackendResponse?: (text: string, emotion: string, telemetry: any, actions: string[]) => void;
     onAudioChunk?: (data: string) => void;
     onAudioEnd?: () => void;
     onTtsStart?: (emotion: string, text: string) => void;
@@ -19,8 +22,9 @@ interface UseWebSocketAudioOptions {
 
 export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     const {
-        wsUrl = 'ws://localhost:5007/ws', // Default to port 5008 as per backend guide
+        wsUrl = 'ws://localhost:5007/ws',
         onTranscription,
+        onBackendResponse,
         onAudioChunk,
         onAudioEnd,
         onTtsStart,
@@ -29,61 +33,76 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     } = options;
 
     const wsRef = useRef<WebSocket | null>(null);
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const processorRef = useRef<ScriptProcessorNode | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+
+    // Track if the user is holding the button
+    const isActiveRef = useRef(false);
+
     const [isConnected, setIsConnected] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
 
     // Connect to WebSocket
     const connect = useCallback(() => {
-        try {
-            if (wsRef.current?.readyState === WebSocket.OPEN) return;
+        if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-            wsRef.current = new WebSocket(wsUrl);
+        console.log(`🔌 Connecting to ${wsUrl}...`);
+        wsRef.current = new WebSocket(wsUrl);
 
-            wsRef.current.onopen = () => {
-                console.log('✅ WebSocket connected');
-                setIsConnected(true);
-            };
+        wsRef.current.onopen = () => {
+            console.log('✅ WebSocket connected');
+            setIsConnected(true);
+        };
 
-            wsRef.current.onmessage = (event) => {
-                try {
-                    const message: AudioMessage = JSON.parse(event.data);
-
-                    switch (message.type) {
-                        case 'transcription':
-                            if (message.text && onTranscription) onTranscription(message.text);
-                            break;
-                        case 'audio':
-                            if (message.data && onAudioChunk) onAudioChunk(message.data);
-                            break;
-                        case 'audio_end':
-                            if (onAudioEnd) onAudioEnd();
-                            break;
-                        case 'tts_start':
-                            if (onTtsStart && message.text) onTtsStart(message.emotion || 'neutral', message.text);
-                            break;
-                        case 'tts_interrupted':
-                            if (onTtsInterrupted) onTtsInterrupted();
-                            break;
-                    }
-                } catch (e) {
-                    console.error("Parse Error:", e);
+        wsRef.current.onmessage = (event) => {
+            try {
+                const message: AudioMessage = JSON.parse(event.data);
+                switch (message.type) {
+                    case 'stt_final':
+                    case 'transcription':
+                        if (message.text && onTranscription) onTranscription(message.text);
+                        break;
+                    case 'backend_response':
+                        if (onBackendResponse && message.text) {
+                            onBackendResponse(
+                                message.text,
+                                message.emotion || 'neutral',
+                                message.telemetry || {},
+                                message.actions || []
+                            );
+                        }
+                        break;
+                    case 'audio':
+                        if (message.data && onAudioChunk) onAudioChunk(message.data);
+                        break;
+                    case 'audio_end':
+                        if (onAudioEnd) onAudioEnd();
+                        break;
+                    case 'tts_start':
+                        if (onTtsStart && message.text) onTtsStart(message.emotion || 'neutral', message.text);
+                        break;
+                    case 'tts_interrupted':
+                        if (onTtsInterrupted) onTtsInterrupted();
+                        break;
                 }
-            };
+            } catch (e) {
+                console.error("Parse Error:", e);
+            }
+        };
 
-            wsRef.current.onerror = (error) => {
-                console.error('WebSocket Error:', error);
-                setIsConnected(false);
-                if (onError) onError(new Error('WebSocket connection failed'));
-            };
+        wsRef.current.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+            setIsConnected(false);
+            if (onError) onError(new Error('WebSocket connection failed'));
+        };
 
-            wsRef.current.onclose = () => {
-                setIsConnected(false);
-            };
-        } catch (error) {
-            if (onError && error instanceof Error) onError(error);
-        }
-    }, [wsUrl, onTranscription, onAudioChunk, onAudioEnd, onTtsStart, onTtsInterrupted, onError]);
+        wsRef.current.onclose = () => {
+            console.log('🔌 WebSocket disconnected');
+            setIsConnected(false);
+        };
+    }, [wsUrl, onTranscription, onBackendResponse, onAudioChunk, onAudioEnd, onTtsStart, onTtsInterrupted, onError]);
 
     const disconnect = useCallback(() => {
         wsRef.current?.close();
@@ -91,48 +110,113 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         setIsConnected(false);
     }, []);
 
-    const sendAudio = useCallback((data: Uint8Array) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(data);
-        }
-    }, []);
-
     const startRecording = useCallback(async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            // Use chunks of 100ms for real-time streaming
-            const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        if (isActiveRef.current) return;
+        isActiveRef.current = true;
 
-            mediaRecorder.ondataavailable = async (event) => {
-                if (event.data.size > 0) {
-                    const buffer = await event.data.arrayBuffer();
-                    sendAudio(new Uint8Array(buffer));
+        try {
+            // 1. Create Audio Context (Must be 16kHz for backend VAD)
+            const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+            const audioContext = new AudioContext({ sampleRate: 16000 });
+            audioContextRef.current = audioContext;
+
+            // Log the actual rate to debug browser behavior
+            console.log(`🎙️ Audio Sample Rate: ${audioContext.sampleRate}Hz`);
+
+            // 2. Get Microphone Access
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 16000 // Hint to browser
                 }
+            });
+
+            if (!isActiveRef.current) {
+                console.log("🛑 Button released during init. Aborting.");
+                stream.getTracks().forEach(t => t.stop());
+                audioContext.close();
+                return;
+            }
+
+            streamRef.current = stream;
+
+            // 3. Audio Pipeline
+            const source = audioContext.createMediaStreamSource(stream);
+            sourceRef.current = source;
+
+            // Buffer size 4096 is a good balance for latency/performance
+            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+            processorRef.current = processor;
+
+            processor.onaudioprocess = (e) => {
+                if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+                const inputData = e.inputBuffer.getChannelData(0);
+
+                // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
+                const int16Data = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+
+                wsRef.current.send(int16Data.buffer);
             };
 
-            mediaRecorder.start(100);
-            mediaRecorderRef.current = mediaRecorder;
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+
             setIsRecording(true);
+            console.log("🎤 Recording Started");
+
         } catch (err) {
+            console.error("Microphone Error:", err);
+            isActiveRef.current = false;
             if (onError && err instanceof Error) onError(err);
         }
-    }, [sendAudio, onError]);
+    }, [onError]);
 
     const stopRecording = useCallback(() => {
-        if (mediaRecorderRef.current && isRecording) {
-            mediaRecorderRef.current.stop();
-            mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
-            setIsRecording(false);
-        }
-    }, [isRecording]);
+        console.log("🛑 Stop Requested");
+        isActiveRef.current = false;
 
-    // Cleanup
+        // --- CRITICAL FIX: Send Silence to Trigger Backend VAD ---
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            console.log("📤 Sending silence burst to trigger VAD...");
+            // Send ~1 second of silence (16000 samples)
+            const silence = new Int16Array(16000).fill(0);
+            wsRef.current.send(silence.buffer);
+        }
+        // ---------------------------------------------------------
+
+        // Clean up audio resources
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+        }
+        if (processorRef.current && sourceRef.current) {
+            sourceRef.current.disconnect();
+            processorRef.current.disconnect();
+            processorRef.current = null;
+            sourceRef.current = null;
+        }
+        if (audioContextRef.current) {
+            audioContextRef.current.close();
+            audioContextRef.current = null;
+        }
+        setIsRecording(false);
+    }, []);
+
+    // Cleanup on unmount
     useEffect(() => {
         return () => {
             stopRecording();
             disconnect();
         };
-    }, [disconnect, stopRecording]);
+    }, []);
 
     return { isConnected, isRecording, connect, disconnect, startRecording, stopRecording };
 };

@@ -7,6 +7,8 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   emotion?: string;
+  telemetry?: any;
+  actions?: string[];
 }
 
 export default function DashboardPage() {
@@ -22,21 +24,30 @@ export default function DashboardPage() {
     startRecording,
     stopRecording
   } = useWebSocketAudio({
-    wsUrl: 'ws://localhost:5007/ws', // Backend WebSocket URL
+    wsUrl: 'ws://localhost:5007/ws',
 
     onTranscription: (text) => {
-      // Add User Message
+      console.log("📝 Transcription received:", text);
       setMessages(prev => [...prev, { role: 'user', content: text }]);
     },
 
+    onBackendResponse: (text, emotion, telemetry, actions) => {
+      console.log("🤖 Backend response:", { text, emotion, telemetry, actions });
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: text,
+        emotion,
+        telemetry,
+        actions
+      }]);
+    },
+
     onTtsStart: (emotion, text) => {
-      // Add Assistant Message & Update Status
-      setMessages(prev => [...prev, { role: 'assistant', content: text, emotion }]);
+      console.log("🗣️ TTS Started:", emotion);
       setStatus("speaking");
     },
 
     onAudioChunk: async (base64Data) => {
-      // Audio Playback Logic
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
@@ -54,17 +65,18 @@ export default function DashboardPage() {
         source.connect(audioContextRef.current.destination);
         source.start(0);
       } catch (e) {
-        console.error("Audio Decode Error", e);
+        console.error("❌ Audio Decode Error", e);
       }
     },
 
     onAudioEnd: () => {
+      console.log("✅ Audio Playback Ended");
       setStatus("connected");
     },
 
     onError: (err) => {
-      console.error(err);
-      alert("Connection Error: Ensure backend is running on port 5008");
+      console.error("❌ Hook Error:", err);
+      alert("Connection Error: Check console logs.");
     }
   });
 
@@ -79,6 +91,20 @@ export default function DashboardPage() {
     else if (isConnected && status !== "speaking") setStatus("connected");
     else if (!isConnected) setStatus("idle");
   }, [isRecording, isConnected]);
+
+  // Wrapper handlers for logging
+  const handleStart = (e: any) => {
+    e.preventDefault(); // Prevent ghost clicks
+    console.log(`🖱️ Event: ${e.type} triggered`);
+    if (!isRecording) startRecording();
+  };
+
+  const handleStop = (e: any) => {
+    e.preventDefault();
+    console.log(`🖱️ Event: ${e.type} triggered`);
+    //if (isRecording) 
+    stopRecording();
+  };
 
   return (
     <main className="min-h-screen bg-slate-50 flex flex-col items-center p-6 gap-6">
@@ -110,6 +136,27 @@ export default function DashboardPage() {
               }`}>
               <p>{msg.content}</p>
               {msg.emotion && <span className="text-xs opacity-50 mt-1 block capitalize">Mood: {msg.emotion}</span>}
+
+              {/* Display telemetry data for assistant messages */}
+              {msg.role === 'assistant' && msg.telemetry && (
+                <div className="mt-2 pt-2 border-t border-slate-300 text-xs space-y-0.5">
+                  <div className="font-semibold opacity-70">System Status:</div>
+                  <div className="opacity-60">
+                    Pressure: {msg.telemetry.pressure} bar | Frequency: {msg.telemetry.frequency} Hz
+                  </div>
+                  <div className="opacity-60">
+                    Load: {msg.telemetry.load} MW | Mode: {msg.telemetry.scenario_mode}
+                  </div>
+                </div>
+              )}
+
+              {/* Display actions executed */}
+              {msg.actions && msg.actions.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-slate-300 text-xs">
+                  <span className="font-semibold opacity-70">Actions: </span>
+                  <span className="opacity-60">{msg.actions.join(', ')}</span>
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -123,10 +170,11 @@ export default function DashboardPage() {
       {/* Controls */}
       <div className="w-full max-w-md flex flex-col items-center gap-4">
         <button
-          onMouseDown={startRecording}
-          onMouseUp={stopRecording}
-          onTouchStart={startRecording}
-          onTouchEnd={stopRecording}
+          onMouseDown={handleStart}
+          onMouseUp={handleStop}
+          onMouseLeave={handleStop} // IMPORTANT: Fixes "stuck" state if dragging outside
+          onTouchStart={handleStart}
+          onTouchEnd={handleStop}
           disabled={!isConnected}
           className={`w-24 h-24 rounded-full flex items-center justify-center transition-all shadow-xl relative ${status === "recording"
             ? "bg-red-500 scale-110 shadow-red-200"
