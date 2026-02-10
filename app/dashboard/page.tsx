@@ -1,8 +1,8 @@
 "use client";
-
 import { useState, useEffect } from "react";
 import { useWebSocketAudio } from "@/lib/useWebSocketAudio";
 import { VoiceAssistant } from "@/components/VoiceAssistant";
+import { PlantDashboard } from "@/components/plant/plant-dashboard";
 
 interface Message {
   role: 'user' | 'assistant';
@@ -96,43 +96,31 @@ export default function DashboardPage() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-50 flex flex-col items-center p-6 gap-6">
+    <main className="min-h-screen bg-slate-950 flex flex-col items-center p-6 gap-6 text-slate-100">
 
       {/* Header */}
-      <div className="text-center mt-10 mb-6">
-        <h1 className="text-3xl font-bold text-slate-900">Conversational AI</h1>
-        <p className="text-slate-500 text-sm mt-2">Voice-Enabled Power Plant Assistant</p>
+      <div className="text-center mt-4 mb-2">
+        <h1 className="text-3xl font-bold text-white">InsightsAI Plant Monitor</h1>
+        <p className="text-slate-400 text-sm mt-1">Real-time Digital Twin & Voice Assistant</p>
       </div>
 
       {/* Voice Assistant Unit */}
-      <VoiceAssistant
-        isConnected={isConnected}
-        isCallActive={isCallActive}
-        serverStatus={assistantState}
-        transcript={currentTranscript}
-        onStartCall={handleStartCall}
-        onEndCall={stopCall}
-      />
-
-      {/* Structured Data Logs (Optional view) */}
-      <div className="w-full max-w-2xl mt-8 border-t border-slate-200 pt-8">
-        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">Recent Actions & Telemetry</h3>
-        <div className="space-y-3 opacity-80">
-          {messages.slice(-3).map((msg, i) => (
-            msg.telemetry && (
-              <div key={i} className="bg-white p-3 rounded-lg border border-slate-200 text-xs shadow-sm flex justify-between">
-                <div>
-                  <span className="font-bold text-blue-600">STATE: </span>
-                  {msg.telemetry.status} | Load: {msg.telemetry.load}MW
-                </div>
-                <div className="text-slate-500">
-                  {new Date().toLocaleTimeString()}
-                </div>
-              </div>
-            )
-          ))}
-        </div>
+      <div className="w-full max-w-4xl mx-auto mb-8">
+        <VoiceAssistant
+          isConnected={isConnected}
+          isCallActive={isCallActive}
+          serverStatus={assistantState}
+          transcript={currentTranscript}
+          onStartCall={handleStartCall}
+          onEndCall={stopCall}
+        />
       </div>
+
+      {/* Simulation Dashboard */}
+      <div className="w-full">
+        <PlantDashboard />
+      </div>
+
     </main>
   );
 }
