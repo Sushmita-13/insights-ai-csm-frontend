@@ -89,6 +89,11 @@ export default function DashboardPage() {
     }
   }, [isCallActive]);
 
+  const handleStartCall = () => {
+    const sessionId = crypto.randomUUID();
+    console.log("Starting Call with Session ID:", sessionId);
+    startCall(sessionId);
+  };
 
   return (
     <main className="min-h-screen bg-slate-50 flex flex-col items-center p-6 gap-6">
@@ -105,7 +110,7 @@ export default function DashboardPage() {
         isCallActive={isCallActive}
         serverStatus={assistantState}
         transcript={currentTranscript}
-        onStartCall={startCall}
+        onStartCall={handleStartCall}
         onEndCall={stopCall}
       />
 

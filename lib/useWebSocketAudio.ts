@@ -35,12 +35,12 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     const audioContextRef = useRef<AudioContext | null>(null);
     const processorRef = useRef<ScriptProcessorNode | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
-    const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
 
     // Audio Queue System
     const audioQueueRef = useRef<Array<{ buffer: AudioBuffer }>>([]);
     const isPlayingRef = useRef(false);
-    const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+    // Track the active source so we can kill it immediately on interruption
+    const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
     const [isConnected, setIsConnected] = useState(false);
     const [isCallActive, setIsCallActive] = useState(false);
@@ -63,10 +63,9 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             const source = audioContextRef.current.createBufferSource();
             source.buffer = item.buffer;
             source.connect(audioContextRef.current.destination);
-            currentSourceRef.current = source;
+            activeSourceRef.current = source;
 
             source.onended = () => {
-                currentSourceRef.current = null;
                 isPlayingRef.current = false;
                 playNextInQueue();
             };
@@ -91,7 +90,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 bytes[i] = binaryString.charCodeAt(i);
             }
 
-            // Decode asynchronously
             const buffer = await audioContextRef.current.decodeAudioData(bytes.buffer);
             audioQueueRef.current.push({ buffer });
             playNextInQueue();
@@ -101,12 +99,18 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     }, [playNextInQueue]);
 
     const stopPlayback = useCallback(() => {
-        if (currentSourceRef.current) {
+        // 1. Immediately stop the currently playing source
+        if (activeSourceRef.current) {
             try {
-                currentSourceRef.current.stop();
-            } catch (e) { /* ignore */ }
-            currentSourceRef.current = null;
+                activeSourceRef.current.stop();
+                activeSourceRef.current.disconnect(); // Disconnect to ensure silence
+            } catch (e) {
+                console.warn("Stop playback warning:", e);
+            }
+            activeSourceRef.current = null;
         }
+
+        // 2. Clear the pending queue
         audioQueueRef.current = [];
         isPlayingRef.current = false;
     }, []);
@@ -123,9 +127,22 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             setIsConnected(true);
         };
 
+        wsRef.current.onclose = () => {
+            console.log('🔌 WebSocket disconnected');
+            setIsConnected(false);
+            setIsCallActive(false);
+        };
+
+        wsRef.current.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+            setIsConnected(false);
+            if (onError) onError(new Error('WebSocket connection failed'));
+        };
+
         wsRef.current.onmessage = (event) => {
             try {
                 const message: AudioMessage = JSON.parse(event.data);
+
                 switch (message.type) {
                     case 'stt_final':
                     case 'transcription':
@@ -143,19 +160,25 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         }
                         break;
 
+                    case 'tts_start':
+                        // If a new TTS starts, ensure any old audio is cleared
+                        stopPlayback();
+                        if (onTtsStart && message.text) onTtsStart(message.emotion || 'neutral', message.text);
+                        break;
+
                     case 'audio':
                         if (message.data) queueAudioChunk(message.data);
                         break;
 
-                    case 'tts_start':
-                        if (onTtsStart && message.text) onTtsStart(message.emotion || 'neutral', message.text);
+                    case 'audio_end':
+                        if (options.onAudioEnd) options.onAudioEnd();
                         break;
 
                     case 'tts_interrupted':
-                        console.log("⚡ Barge-in detected! Stopping playback.");
+                        console.log("⚡ Barge-in detected (Client)! Stopping playback.");
                         stopPlayback();
                         if (onTtsInterrupted) onTtsInterrupted();
-                        break; // Important: Prioritize stopping audio
+                        break;
 
                     case 'error':
                         console.error("Server Error:", message.message);
@@ -163,22 +186,10 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         break;
                 }
             } catch (e) {
-                console.error("Parse Error:", e);
+                console.error("WS Parse Error:", e);
             }
         };
-
-        wsRef.current.onerror = (error) => {
-            console.error('WebSocket Error:', error);
-            setIsConnected(false);
-            if (onError) onError(new Error('WebSocket connection failed'));
-        };
-
-        wsRef.current.onclose = () => {
-            console.log('🔌 WebSocket disconnected');
-            setIsConnected(false);
-            setIsCallActive(false);
-        };
-    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onError, queueAudioChunk, stopPlayback]);
+    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onError, queueAudioChunk, stopPlayback, options]);
 
     const disconnect = useCallback(() => {
         stopCall();
@@ -188,13 +199,21 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     }, []);
 
     // ================== MICROPHONE / CALL LOGIC ==================
-    const startCall = useCallback(async () => {
+    const startCall = useCallback(async (sessionId?: string) => {
         if (isCallActive) return;
 
+        // Propagate Session ID to Backend
+        if (sessionId && wsRef.current?.readyState === WebSocket.OPEN) {
+            console.log(`🆔 Configured Session: ${sessionId}`);
+            wsRef.current.send(JSON.stringify({
+                type: "session_config",
+                sessionId: sessionId
+            }));
+        }
+
         try {
-            // 1. Create Audio Context
             const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-            // Re-use or create new context
+
             if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
                 audioContextRef.current = new AudioContext({ sampleRate: 16000 });
             } else if (audioContextRef.current.state === 'suspended') {
@@ -203,7 +222,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
             console.log(`🎙️ Audio Sample Rate: ${audioContextRef.current.sampleRate}Hz`);
 
-            // 2. Get Microphone
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     channelCount: 1,
@@ -215,10 +233,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             });
             streamRef.current = stream;
 
-            // 3. Setup Audio Pipeline
             const source = audioContextRef.current.createMediaStreamSource(stream);
-            sourceRef.current = source;
-
             const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
             processorRef.current = processor;
 
@@ -226,7 +241,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 if (wsRef.current?.readyState !== WebSocket.OPEN) return;
 
                 const inputData = e.inputBuffer.getChannelData(0);
-                // Convert to Int16
+                // Convert Float32 to Int16 for backend
                 const int16Data = new Int16Array(inputData.length);
                 for (let i = 0; i < inputData.length; i++) {
                     const s = Math.max(-1, Math.min(1, inputData[i]));
@@ -251,32 +266,29 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     const stopCall = useCallback(() => {
         console.log("☎️ Ending Call");
 
-        // Cleanup Mic
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
+        // Notify backend of session end
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "session_end" }));
         }
-        if (processorRef.current && sourceRef.current) {
-            sourceRef.current.disconnect();
+
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+
+        if (processorRef.current) {
             processorRef.current.disconnect();
             processorRef.current = null;
-            sourceRef.current = null;
         }
 
-        // Send silence to ensure VAD closes if it was open (optional but good practice)
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            const silence = new Int16Array(16000).fill(0);
-            wsRef.current.send(silence.buffer);
-        }
-
+        // Clear any audio currently playing
+        stopPlayback();
         setIsCallActive(false);
-    }, []);
+    }, [stopPlayback]);
 
     // Cleanup on unmount
     useEffect(() => {
         return () => {
             stopCall();
-            disconnect();
+            wsRef.current?.close();
         };
     }, []);
 
