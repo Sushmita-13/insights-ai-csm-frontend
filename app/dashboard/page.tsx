@@ -14,9 +14,10 @@ interface Message {
 
 export default function DashboardPage() {
   const [messages, setMessages] = useState<Message[]>([]);
-  // 'idle' | 'connected' | 'listening' | 'speaking' | 'processing'
-  const [assistantState, setAssistantState] = useState<string>("Listening");
+  // 'Idle' | 'Connected' | 'Listening' | 'Speaking' | 'Processing' | 'Waiting for AI...'
+  const [assistantState, setAssistantState] = useState<string>("Idle");
   const [currentTranscript, setCurrentTranscript] = useState("");
+  const [simulationActive, setSimulationActive] = useState(false); // NEW: Simulation State
 
   const {
     isConnected,
@@ -25,7 +26,8 @@ export default function DashboardPage() {
     startCall,
     stopCall,
     isMuted,
-    toggleMute
+    toggleMute,
+    greetingInProgress // Exposed from hook
   } = useWebSocketAudio({
     wsUrl: 'ws://localhost:5007/ws',
 
@@ -44,7 +46,6 @@ export default function DashboardPage() {
         telemetry,
         actions
       }]);
-      // Note: We don't set 'Speaking' here, we wait for 'tts_start' or audio chunks
     },
 
     onTtsStart: (emotion, text) => {
@@ -53,7 +54,7 @@ export default function DashboardPage() {
       setCurrentTranscript(text);
     },
 
-    // Fallback if no TTS start event (e.g. direct audio stream)
+    // Fallback if no TTS start event
     onAudioChunk: () => {
       if (assistantState !== "Speaking") setAssistantState("Speaking");
     },
@@ -70,9 +71,13 @@ export default function DashboardPage() {
       setCurrentTranscript("");
     },
 
+    onSimulationStart: () => { // NEW
+      console.log("🚀 Simulation Started (Dashboard Update)");
+      setSimulationActive(true);
+    },
+
     onError: (err) => {
       console.error("❌ Error:", err);
-      // Optional: Show toast
     }
   });
 
@@ -83,17 +88,19 @@ export default function DashboardPage() {
 
   // Sync state when call starts/stops
   useEffect(() => {
-    if (!isCallActive) {
+    if (!isCallActive && !greetingInProgress) {
       setAssistantState("Idle");
       setCurrentTranscript("");
-    } else {
-      setAssistantState("Listening");
+    } else if (isCallActive && !greetingInProgress) {
+      // Normal state
+      // setAssistantState("Listening"); // Handled by onAudioEnd usually
     }
-  }, [isCallActive]);
+  }, [isCallActive, greetingInProgress]);
 
   const handleStartCall = () => {
     const sessionId = crypto.randomUUID();
     console.log("Starting Call with Session ID:", sessionId);
+    setAssistantState("Waiting for AI..."); // Updated Greeting Status
     startCall(sessionId);
   };
 
@@ -117,7 +124,7 @@ export default function DashboardPage() {
           <div className="h-full flex flex-col justify-center">
             <VoiceAssistant
               isConnected={isConnected}
-              isCallActive={isCallActive}
+              isCallActive={isCallActive || greetingInProgress} // Ensure UI shows active during greeting
               serverStatus={assistantState}
               transcript={currentTranscript}
               onStartCall={handleStartCall}
@@ -131,7 +138,7 @@ export default function DashboardPage() {
         {/* Right Panel: Simulation Dashboard (Takes remaining space) */}
         <div className="flex-1 p-4 bg-slate-950/50 overflow-hidden relative">
           <div className="h-full w-full">
-            <PlantDashboard />
+            <PlantDashboard simulationActive={simulationActive} />
           </div>
         </div>
 

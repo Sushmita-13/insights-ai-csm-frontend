@@ -6,16 +6,27 @@ import { BoilerWidget } from './boiler-widget';
 import { TurbineWidget } from './turbine-widget';
 import { MillsWidget } from './mills-widget';
 
-export function PlantDashboard() {
+interface PlantDashboardProps {
+    simulationActive?: boolean;
+}
+
+export function PlantDashboard({ simulationActive = false }: PlantDashboardProps) {
     const { plantState, isConnected, sendAction } = usePlantSocket();
 
-    if (!plantState) {
+    if (!plantState || !simulationActive) {
         return (
-            <div className="flex flex-col gap-4 items-center justify-center min-h-[500px] text-gray-500 animate-pulse">
-                <div className="text-xl font-mono">
-                    {isConnected ? 'Syncing with Plant Digital Twin...' : 'Connecting to Simulation Server...'}
+            <div className="flex flex-col gap-4 items-center justify-center min-h-[500px] text-gray-500">
+                <div className="text-xl font-mono animate-pulse">
+                    {isConnected
+                        ? (simulationActive ? 'Syncing with Plant Digital Twin...' : 'Waiting for Simulation Start...')
+                        : 'Connecting to Simulation Server...'}
                 </div>
-                <div className="text-sm">Ensure Backend is running on localhost:8000</div>
+                {!simulationActive && isConnected && (
+                    <div className="text-sm opacity-75">
+                        Complete the safety briefing with Sentinel to begin.
+                    </div>
+                )}
+                <div className="text-xs text-gray-700">Backend: localhost:8000</div>
             </div>
         );
     }

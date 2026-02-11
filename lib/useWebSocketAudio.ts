@@ -19,6 +19,7 @@ interface UseWebSocketAudioOptions {
     onAudioEnd?: () => void;
     onTtsStart?: (emotion: string, text: string) => void;
     onTtsInterrupted?: () => void;
+    onSimulationStart?: () => void; // NEW
     onError?: (error: Error) => void;
 }
 
@@ -29,6 +30,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         onBackendResponse,
         onTtsStart,
         onTtsInterrupted,
+        onSimulationStart, // NEW
         onError,
     } = options;
 
@@ -44,7 +46,17 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
     const [isConnected, setIsConnected] = useState(false);
-    const [isCallActive, setIsCallActive] = useState(false);
+    const [isCallActive, setIsCallActive] = useState(false); // Call logic + Mic Active
+    const [greetingInProgress, setGreetingInProgress] = useState(false); // NEW
+
+    // Ref for greeting state to access inside processing loops/callbacks without stale closures
+    const greetingInProgressRef = useRef(false);
+
+    // Helper: Update both state and ref
+    const setGreetingState = (active: boolean) => {
+        setGreetingInProgress(active);
+        greetingInProgressRef.current = active;
+    };
 
     // ================== AUDIO PLAYBACK LOGIC ==================
     const playNextInQueue = useCallback(async () => {
@@ -81,7 +93,8 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
     const queueAudioChunk = useCallback(async (base64Data: string) => {
         if (!audioContextRef.current) {
-            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+            audioContextRef.current = new AudioContext({ sampleRate: 16000 });
         }
 
         try {
@@ -116,6 +129,64 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         isPlayingRef.current = false;
     }, []);
 
+    // ================== MICROPHONE SETUP ==================
+    const startMicrophone = useCallback(async () => {
+        try {
+            const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+
+            if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+                audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+            } else if (audioContextRef.current.state === 'suspended') {
+                await audioContextRef.current.resume();
+            }
+
+            console.log(`🎙️ Starting Microphone... (Sample Rate: ${audioContextRef.current.sampleRate}Hz)`);
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 16000
+                }
+            });
+            streamRef.current = stream;
+
+            const source = audioContextRef.current.createMediaStreamSource(stream);
+            const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+            processorRef.current = processor;
+
+            processor.onaudioprocess = (e) => {
+                if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+                // Block audio transmission if we are waiting for greeting completion
+                // (Double safety, though we shouldn't have started mic if greeting is in progress)
+                if (greetingInProgressRef.current) return;
+
+                const inputData = e.inputBuffer.getChannelData(0);
+                // Convert Float32 to Int16 for backend
+                const int16Data = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                wsRef.current.send(int16Data.buffer);
+            };
+
+            source.connect(processor);
+            processor.connect(audioContextRef.current.destination);
+
+            setIsCallActive(true);
+            console.log("📞 Microphone Active & Streaming");
+
+        } catch (err) {
+            console.error("Microphone Error:", err);
+            setIsCallActive(false);
+            if (onError && err instanceof Error) onError(err);
+        }
+    }, [onError]);
+
     // ================== WEBSOCKET LOGIC ==================
     const connect = useCallback(() => {
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -142,9 +213,14 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
         wsRef.current.onmessage = (event) => {
             try {
-                const message: AudioMessage = JSON.parse(event.data);
+                const message: any = JSON.parse(event.data);
 
                 switch (message.type) {
+                    case 'simulation_started': // NEW
+                        console.log("🚀 Simulation Started Event Received via Audio Socket");
+                        if (onSimulationStart) onSimulationStart();
+                        break;
+
                     case 'stt_final':
                     case 'transcription':
                         if (message.text && onTranscription) onTranscription(message.text);
@@ -172,6 +248,15 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         break;
 
                     case 'audio_end':
+                        console.log("✅ Audio playback ended");
+
+                        // Greeting Flow Check:
+                        if (greetingInProgressRef.current) {
+                            console.log("📢 Greeting complete. Activating microphone now.");
+                            setGreetingState(false);
+                            startMicrophone(); // START MIC NOW
+                        }
+
                         if (options.onAudioEnd) options.onAudioEnd();
                         break;
 
@@ -190,79 +275,14 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 console.error("WS Parse Error:", e);
             }
         };
-    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onError, queueAudioChunk, stopPlayback, options]);
+    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onSimulationStart, onError, queueAudioChunk, stopPlayback, options, startMicrophone]);
 
     const disconnect = useCallback(() => {
         stopCall();
         wsRef.current?.close();
         wsRef.current = null;
         setIsConnected(false);
-    }, []);
-
-    // ================== MICROPHONE / CALL LOGIC ==================
-    const startCall = useCallback(async (sessionId?: string) => {
-        if (isCallActive) return;
-
-        // Propagate Session ID to Backend
-        if (sessionId && wsRef.current?.readyState === WebSocket.OPEN) {
-            console.log(`🆔 Configured Session: ${sessionId}`);
-            wsRef.current.send(JSON.stringify({
-                type: "session_config",
-                sessionId: sessionId
-            }));
-        }
-
-        try {
-            const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-
-            if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-                audioContextRef.current = new AudioContext({ sampleRate: 16000 });
-            } else if (audioContextRef.current.state === 'suspended') {
-                await audioContextRef.current.resume();
-            }
-
-            console.log(`🎙️ Audio Sample Rate: ${audioContextRef.current.sampleRate}Hz`);
-
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
-                    sampleRate: 16000
-                }
-            });
-            streamRef.current = stream;
-
-            const source = audioContextRef.current.createMediaStreamSource(stream);
-            const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-            processorRef.current = processor;
-
-            processor.onaudioprocess = (e) => {
-                if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-
-                const inputData = e.inputBuffer.getChannelData(0);
-                // Convert Float32 to Int16 for backend
-                const int16Data = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    const s = Math.max(-1, Math.min(1, inputData[i]));
-                    int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-                }
-                wsRef.current.send(int16Data.buffer);
-            };
-
-            source.connect(processor);
-            processor.connect(audioContextRef.current.destination);
-
-            setIsCallActive(true);
-            console.log("📞 Call Started");
-
-        } catch (err) {
-            console.error("Microphone Error:", err);
-            setIsCallActive(false);
-            if (onError && err instanceof Error) onError(err);
-        }
-    }, [isCallActive, onError]);
+    }, []); // stopCall is dependent, but we define it below
 
     const [isMuted, setIsMuted] = useState(false);
 
@@ -297,8 +317,30 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         // Clear any audio currently playing
         stopPlayback();
         setIsCallActive(false);
+        setGreetingState(false); // Reset greeting state
         setIsMuted(false); // Reset mute state
     }, [stopPlayback]);
+
+    // Call start trigger
+    const startCall = useCallback(async (sessionId?: string) => {
+        if (isCallActive || greetingInProgress) return;
+
+        // Propagate Session ID to Backend
+        if (sessionId && wsRef.current?.readyState === WebSocket.OPEN) {
+            console.log(`🆔 Configured Session: ${sessionId}`);
+            wsRef.current.send(JSON.stringify({
+                type: "session_config",
+                sessionId: sessionId
+            }));
+
+            // Start Greeting Flow
+            // We do NOT start the microphone here.
+            // We wait for the audio to finish playing (greeting).
+            console.log("⏳ Starting Call: Waiting for AI Greeting...");
+            setGreetingState(true);
+        }
+    }, [isCallActive, greetingInProgress]);
+
 
     // Cleanup on unmount
     useEffect(() => {
@@ -311,6 +353,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     return {
         isConnected,
         isCallActive,
+        greetingInProgress, // EXPOSE THIS
         isMuted,
         connect,
         disconnect,
