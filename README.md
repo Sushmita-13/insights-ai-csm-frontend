@@ -21,8 +21,8 @@ This is a Next.js-based frontend designed for interacting with a Conversational 
 ### Prerequisites
 
 This frontend expects a backend service running locally at:
-- **Base URL**: `http://localhost:5007`
-- **STT Endpoint**: `/stt` (POST)
+- **Base URL**: `http://localhost:8000`
+- **WebSocket Query**: `/ws/query` (Unified pipeline)
 
 ### Installation
 

@@ -29,7 +29,7 @@ export default function DashboardPage() {
     toggleMute,
     greetingInProgress // Exposed from hook
   } = useWebSocketAudio({
-    wsUrl: 'ws://localhost:5007/ws',
+    wsUrl: 'ws://localhost:8000/ws/query',
 
     onTranscription: (text) => {
       console.log("📝 User:", text);
@@ -46,6 +46,12 @@ export default function DashboardPage() {
         telemetry,
         actions
       }]);
+
+      // Fallback: Also check actions array for simulation start
+      if (actions?.includes("Started Plant Simulation")) {
+        console.log("🚀 Simulation Start detected in actions array");
+        setSimulationActive(true);
+      }
     },
 
     onTtsStart: (emotion, text) => {

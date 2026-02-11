@@ -58,7 +58,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             {/* --- Status Header --- */}
             <div className="absolute top-4 left-0 right-0 text-center">
                 <span className="inline-block px-3 py-1 rounded-full text-xs font-bold tracking-widest uppercase bg-white/80 backdrop-blur shadow-sm text-slate-600">
-                    {isConnected ? (isCallActive ? (isMuted ? "Muted" : serverStatus) : "Ready to Call") : "Connecting..."}
+                    {isConnected ? (isCallActive ? "" : "Ready to Call") : "Connecting..."}
                 </span>
             </div>
 
@@ -104,7 +104,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                 ref={transcriptRef}
                 className="h-32 mb-6 overflow-y-auto bg-white/60 backdrop-blur-sm rounded-xl p-4 text-center text-sm font-medium text-slate-700 shadow-inner border border-white/50"
             >
-                {transcript || (isCallActive ? (isMuted ? "Microphone is muted." : "Listening...") : "Start a call to begin conversation.")}
+                {transcript || (isCallActive ? "" : "Start a call to begin conversation.")}
             </div>
 
             {/* --- Controls --- */}

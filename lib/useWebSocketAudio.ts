@@ -25,7 +25,7 @@ interface UseWebSocketAudioOptions {
 
 export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     const {
-        wsUrl = 'ws://localhost:5007/ws',
+        wsUrl = 'ws://localhost:8000/ws/query',
         onTranscription,
         onBackendResponse,
         onTtsStart,
@@ -244,9 +244,27 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 const message: any = JSON.parse(event.data);
 
                 switch (message.type) {
-                    case 'simulation_started': // NEW
+                    case 'simulation_started':
                         console.log("🚀 Simulation Started Event Received via Audio Socket");
                         if (onSimulationStart) onSimulationStart();
+                        break;
+
+                    case 'intro_start':
+                        console.log("👋 AI Greeting Beginning");
+                        setGreetingState(true);
+                        break;
+
+                    case 'intro_stop':
+                        console.log("👋 AI Greeting Finished");
+                        setGreetingState(false);
+                        // Ensure mic is unmuted if we were in greeting flow
+                        if (streamRef.current) {
+                            streamRef.current.getAudioTracks().forEach(track => {
+                                track.enabled = true;
+                            });
+                            setIsMuted(false);
+                            console.log("🔓 Microphone Unmuted");
+                        }
                         break;
 
                     case 'stt_final':
@@ -276,24 +294,34 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         break;
 
                     case 'audio_end':
-                        console.log("✅ Audio playback ended");
+                        console.log("✅ Audio stream signal received. Waiting for buffer to clear...");
 
-                        // Greeting Flow Check:
-                        if (greetingInProgressRef.current) {
-                            console.log("📢 Greeting complete. Unmuting microphone now.");
-                            setGreetingState(false);
+                        // --- Playback-Aware Unmuting ---
+                        // nextStartTimeRef.current is the timestamp when the last scheduled chunk will finish.
+                        // We wait until that time before releasing the mic.
+                        const now = audioContextRef.current?.currentTime || 0;
+                        const remainingTimeMs = Math.max(0, (nextStartTimeRef.current - now) * 1000);
 
-                            // Auto-unmute
-                            if (streamRef.current) {
-                                streamRef.current.getAudioTracks().forEach(track => {
-                                    track.enabled = true;
-                                });
-                                setIsMuted(false);
-                                console.log("🔓 Microphone Unmuted");
+                        console.log(`⏳ Unmuting in ${remainingTimeMs.toFixed(0)}ms (at completion of buffered audio)`);
+
+                        setTimeout(() => {
+                            // Greeting Flow Check:
+                            if (greetingInProgressRef.current) {
+                                console.log("📢 Greeting complete. Releasing microphone stream.");
+                                setGreetingState(false);
+
+                                // Auto-unmute
+                                if (streamRef.current) {
+                                    streamRef.current.getAudioTracks().forEach(track => {
+                                        track.enabled = true;
+                                    });
+                                    setIsMuted(false);
+                                    console.log("🔓 Microphone Unmuted");
+                                }
                             }
-                        }
 
-                        if (options.onAudioEnd) options.onAudioEnd();
+                            if (options.onAudioEnd) options.onAudioEnd();
+                        }, remainingTimeMs);
                         break;
 
                     case 'tts_interrupted':
