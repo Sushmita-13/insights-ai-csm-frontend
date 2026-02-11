@@ -100,7 +100,7 @@ export default function DashboardPage() {
   const handleStartCall = () => {
     const sessionId = crypto.randomUUID();
     console.log("Starting Call with Session ID:", sessionId);
-    setAssistantState("Waiting for AI..."); // Updated Greeting Status
+    setAssistantState("Thinking"); // Started Thinking immediately
     startCall(sessionId);
   };
 

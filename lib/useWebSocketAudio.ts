@@ -44,6 +44,10 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     const isPlayingRef = useRef(false);
     // Track the active source so we can kill it immediately on interruption
     const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
+    const nextStartTimeRef = useRef<number>(0);
+
+    // Residue buffer for odd byte chunks to maintain 16-bit alignment
+    const residueRef = useRef<Uint8Array | null>(null);
 
     const [isConnected, setIsConnected] = useState(false);
     const [isCallActive, setIsCallActive] = useState(false); // Call logic + Mic Active
@@ -59,37 +63,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     };
 
     // ================== AUDIO PLAYBACK LOGIC ==================
-    const playNextInQueue = useCallback(async () => {
-        if (!audioContextRef.current || audioQueueRef.current.length === 0 || isPlayingRef.current) {
-            return;
-        }
-
-        isPlayingRef.current = true;
-        const item = audioQueueRef.current.shift();
-
-        if (!item) {
-            isPlayingRef.current = false;
-            return;
-        }
-
-        try {
-            const source = audioContextRef.current.createBufferSource();
-            source.buffer = item.buffer;
-            source.connect(audioContextRef.current.destination);
-            activeSourceRef.current = source;
-
-            source.onended = () => {
-                isPlayingRef.current = false;
-                playNextInQueue();
-            };
-
-            source.start(0);
-        } catch (e) {
-            console.error("Playback Error:", e);
-            isPlayingRef.current = false;
-            playNextInQueue();
-        }
-    }, []);
+    // (Deprecated sequential queue in favor of scheduled streaming)
 
     const queueAudioChunk = useCallback(async (base64Data: string) => {
         if (!audioContextRef.current) {
@@ -99,20 +73,62 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
         try {
             const binaryString = window.atob(base64Data);
-            const bytes = new Uint8Array(binaryString.length);
+            const rawBytes = new Uint8Array(binaryString.length);
             for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+                rawBytes[i] = binaryString.charCodeAt(i);
             }
 
-            const buffer = await audioContextRef.current.decodeAudioData(bytes.buffer);
-            audioQueueRef.current.push({ buffer });
-            playNextInQueue();
+            // Combine with residue from previous chunk
+            let combinedBytes: Uint8Array;
+            if (residueRef.current) {
+                combinedBytes = new Uint8Array(residueRef.current.length + rawBytes.length);
+                combinedBytes.set(residueRef.current);
+                combinedBytes.set(rawBytes, residueRef.current.length);
+                residueRef.current = null;
+            } else {
+                combinedBytes = rawBytes;
+            }
+
+            // If length is odd, save the last byte for the next chunk
+            if (combinedBytes.length % 2 !== 0) {
+                residueRef.current = combinedBytes.slice(-1);
+                combinedBytes = combinedBytes.slice(0, -1);
+            }
+
+            if (combinedBytes.length === 0) return;
+
+            // --- RAW PCM (Int16) Interpretation ---
+            // ElevenLabs pcm_16000 is 16-bit signed integer
+            const int16Data = new Int16Array(combinedBytes.buffer, combinedBytes.byteOffset, combinedBytes.length / 2);
+            const float32Data = new Float32Array(int16Data.length);
+            for (let i = 0; i < int16Data.length; i++) {
+                float32Data[i] = int16Data[i] / 32768.0;
+            }
+
+            const buffer = audioContextRef.current.createBuffer(1, float32Data.length, 16000);
+            buffer.getChannelData(0).set(float32Data);
+
+            // --- Gapless Scheduling ---
+            const source = audioContextRef.current.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContextRef.current.destination);
+
+            // Calculate start time: either immediately (plus small buffer) or exactly after previous chunk
+            const now = audioContextRef.current.currentTime;
+            const startTime = Math.max(now + 0.05, nextStartTimeRef.current);
+
+            source.start(startTime);
+            nextStartTimeRef.current = startTime + buffer.duration;
+            activeSourceRef.current = source;
+
         } catch (e) {
-            console.error("Audio Decode Error:", e);
+            console.error("Audio Queue Error:", e);
         }
-    }, [playNextInQueue]);
+    }, []);
 
     const stopPlayback = useCallback(() => {
+        // Reset scheduling
+        nextStartTimeRef.current = 0;
         // 1. Immediately stop the currently playing source
         if (activeSourceRef.current) {
             try {
@@ -130,7 +146,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     }, []);
 
     // ================== MICROPHONE SETUP ==================
-    const startMicrophone = useCallback(async () => {
+    const startMicrophone = useCallback(async (startMuted: boolean = false) => {
         try {
             const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
 
@@ -140,7 +156,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 await audioContextRef.current.resume();
             }
 
-            console.log(`🎙️ Starting Microphone... (Sample Rate: ${audioContextRef.current.sampleRate}Hz)`);
+            console.log(`🎙️ Starting Microphone... (Muted: ${startMuted})`);
 
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
@@ -153,6 +169,16 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             });
             streamRef.current = stream;
 
+            // Set initial mute state on the tracks
+            if (startMuted) {
+                stream.getAudioTracks().forEach(track => {
+                    track.enabled = false;
+                });
+                setIsMuted(true);
+            } else {
+                setIsMuted(false);
+            }
+
             const source = audioContextRef.current.createMediaStreamSource(stream);
             const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
             processorRef.current = processor;
@@ -160,9 +186,11 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             processor.onaudioprocess = (e) => {
                 if (wsRef.current?.readyState !== WebSocket.OPEN) return;
 
-                // Block audio transmission if we are waiting for greeting completion
-                // (Double safety, though we shouldn't have started mic if greeting is in progress)
+                // Block audio transmission if we are waiting for greeting completion OR manually muted
                 if (greetingInProgressRef.current) return;
+
+                // Track enabled check is safer for actual transmission
+                if (streamRef.current && !streamRef.current.getAudioTracks()[0]?.enabled) return;
 
                 const inputData = e.inputBuffer.getChannelData(0);
                 // Convert Float32 to Int16 for backend
@@ -252,9 +280,17 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
                         // Greeting Flow Check:
                         if (greetingInProgressRef.current) {
-                            console.log("📢 Greeting complete. Activating microphone now.");
+                            console.log("📢 Greeting complete. Unmuting microphone now.");
                             setGreetingState(false);
-                            startMicrophone(); // START MIC NOW
+
+                            // Auto-unmute
+                            if (streamRef.current) {
+                                streamRef.current.getAudioTracks().forEach(track => {
+                                    track.enabled = true;
+                                });
+                                setIsMuted(false);
+                                console.log("🔓 Microphone Unmuted");
+                            }
                         }
 
                         if (options.onAudioEnd) options.onAudioEnd();
@@ -326,20 +362,22 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         if (isCallActive || greetingInProgress) return;
 
         // Propagate Session ID to Backend
-        if (sessionId && wsRef.current?.readyState === WebSocket.OPEN) {
-            console.log(`🆔 Configured Session: ${sessionId}`);
-            wsRef.current.send(JSON.stringify({
-                type: "session_config",
-                sessionId: sessionId
-            }));
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            if (sessionId) {
+                console.log(`🆔 Configured Session: ${sessionId}`);
+                wsRef.current.send(JSON.stringify({
+                    type: "session_config",
+                    sessionId: sessionId
+                }));
+            }
 
             // Start Greeting Flow
-            // We do NOT start the microphone here.
-            // We wait for the audio to finish playing (greeting).
-            console.log("⏳ Starting Call: Waiting for AI Greeting...");
+            // Initializing microphone IMMEDIATELY but MUTED to maintain "call" state persistence
+            console.log("⏳ Starting Call: Starting muted microphone, waiting for AI Greeting...");
             setGreetingState(true);
+            await startMicrophone(true); // START MUTED
         }
-    }, [isCallActive, greetingInProgress]);
+    }, [isCallActive, greetingInProgress, startMicrophone]);
 
 
     // Cleanup on unmount
