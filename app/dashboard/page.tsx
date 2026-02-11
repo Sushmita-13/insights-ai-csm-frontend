@@ -23,7 +23,9 @@ export default function DashboardPage() {
     isCallActive,
     connect,
     startCall,
-    stopCall
+    stopCall,
+    isMuted,
+    toggleMute
   } = useWebSocketAudio({
     wsUrl: 'ws://localhost:5007/ws',
 
@@ -96,29 +98,43 @@ export default function DashboardPage() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 flex flex-col items-center p-6 gap-6 text-slate-100">
+    <main className="h-screen w-screen bg-slate-950 flex flex-col overflow-hidden text-slate-100">
 
-      {/* Header */}
-      <div className="text-center mt-4 mb-2">
-        <h1 className="text-3xl font-bold text-white">InsightsAI Plant Monitor</h1>
-        <p className="text-slate-400 text-sm mt-1">Real-time Digital Twin & Voice Assistant</p>
-      </div>
+      {/* Header - Compact */}
+      <header className="flex-none p-4 flex justify-between items-center bg-slate-900/50 backdrop-blur border-b border-slate-800 h-16">
+        <div>
+          <h1 className="text-xl font-bold text-white leading-none">InsightsAI Plant Monitor</h1>
+          <p className="text-slate-400 text-xs text-opacity-80">Real-time Digital Twin & Voice Assistant</p>
+        </div>
+        {/* You could add status indicators here if needed */}
+      </header>
 
-      {/* Voice Assistant Unit */}
-      <div className="w-full max-w-4xl mx-auto mb-8">
-        <VoiceAssistant
-          isConnected={isConnected}
-          isCallActive={isCallActive}
-          serverStatus={assistantState}
-          transcript={currentTranscript}
-          onStartCall={handleStartCall}
-          onEndCall={stopCall}
-        />
-      </div>
+      {/* Main Content - Flex Row for Desktop */}
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
 
-      {/* Simulation Dashboard */}
-      <div className="w-full">
-        <PlantDashboard />
+        {/* Left Panel: Voice Assistant (Fixed Width on large screens) */}
+        <div className="flex-none lg:w-[400px] bg-slate-900/30 p-4 border-b lg:border-b-0 lg:border-r border-slate-800 overflow-y-auto custom-scrollbar">
+          <div className="h-full flex flex-col justify-center">
+            <VoiceAssistant
+              isConnected={isConnected}
+              isCallActive={isCallActive}
+              serverStatus={assistantState}
+              transcript={currentTranscript}
+              onStartCall={handleStartCall}
+              onEndCall={stopCall}
+              isMuted={isMuted}
+              onToggleMute={toggleMute}
+            />
+          </div>
+        </div>
+
+        {/* Right Panel: Simulation Dashboard (Takes remaining space) */}
+        <div className="flex-1 p-4 bg-slate-950/50 overflow-hidden relative">
+          <div className="h-full w-full">
+            <PlantDashboard />
+          </div>
+        </div>
+
       </div>
 
     </main>

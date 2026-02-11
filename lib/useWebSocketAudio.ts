@@ -264,6 +264,20 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         }
     }, [isCallActive, onError]);
 
+    const [isMuted, setIsMuted] = useState(false);
+
+    const toggleMute = useCallback(() => {
+        setIsMuted(prev => {
+            const newState = !prev;
+            if (streamRef.current) {
+                streamRef.current.getAudioTracks().forEach(track => {
+                    track.enabled = !newState;
+                });
+            }
+            return newState;
+        });
+    }, []);
+
     const stopCall = useCallback(() => {
         console.log("☎️ Ending Call");
 
@@ -283,6 +297,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         // Clear any audio currently playing
         stopPlayback();
         setIsCallActive(false);
+        setIsMuted(false); // Reset mute state
     }, [stopPlayback]);
 
     // Cleanup on unmount
@@ -296,9 +311,11 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     return {
         isConnected,
         isCallActive,
+        isMuted,
         connect,
         disconnect,
         startCall,
-        stopCall
+        stopCall,
+        toggleMute
     };
 };
