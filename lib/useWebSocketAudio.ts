@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 interface AudioMessage {
-    type: 'stt_final' | 'backend_response' | 'transcription' | 'audio' | 'audio_end' | 'tts_start' | 'tts_interrupted' | 'error';
+    type: 'stt_final' | 'backend_response' | 'transcription' | 'audio' | 'audio_end' | 'tts_start' | 'tts_interrupted' | 'error' | 'bot_thinking' | 'bot_speaking' | 'bot_stopped' | 'user_activity';
     text?: string;
     data?: string;
     emotion?: string;
@@ -19,7 +19,9 @@ interface UseWebSocketAudioOptions {
     onAudioEnd?: () => void;
     onTtsStart?: (emotion: string, text: string) => void;
     onTtsInterrupted?: () => void;
-    onSimulationStart?: () => void; // NEW
+    onSimulationStart?: () => void;
+    onThinking?: (isThinking: boolean) => void;
+    onSpeaking?: (isSpeaking: boolean) => void;
     onError?: (error: Error) => void;
 }
 
@@ -30,7 +32,9 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         onBackendResponse,
         onTtsStart,
         onTtsInterrupted,
-        onSimulationStart, // NEW
+        onSimulationStart,
+        onThinking,
+        onSpeaking,
         onError,
     } = options;
 
@@ -42,28 +46,25 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     // Audio Queue System
     const audioQueueRef = useRef<Array<{ buffer: AudioBuffer }>>([]);
     const isPlayingRef = useRef(false);
-    // Track the active source so we can kill it immediately on interruption
     const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
     const nextStartTimeRef = useRef<number>(0);
 
-    // Residue buffer for odd byte chunks to maintain 16-bit alignment
     const residueRef = useRef<Uint8Array | null>(null);
 
     const [isConnected, setIsConnected] = useState(false);
-    const [isCallActive, setIsCallActive] = useState(false); // Call logic + Mic Active
-    const [greetingInProgress, setGreetingInProgress] = useState(false); // NEW
+    const [isCallActive, setIsCallActive] = useState(false);
+    const [greetingInProgress, setGreetingInProgress] = useState(false);
+    const [isThinking, setIsThinking] = useState(false);
+    const [isSpeaking, setIsSpeaking] = useState(false);
 
-    // Ref for greeting state to access inside processing loops/callbacks without stale closures
     const greetingInProgressRef = useRef(false);
 
-    // Helper: Update both state and ref
     const setGreetingState = (active: boolean) => {
         setGreetingInProgress(active);
         greetingInProgressRef.current = active;
     };
 
     // ================== AUDIO PLAYBACK LOGIC ==================
-    // (Deprecated sequential queue in favor of scheduled streaming)
 
     const queueAudioChunk = useCallback(async (base64Data: string) => {
         if (!audioContextRef.current) {
@@ -78,7 +79,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 rawBytes[i] = binaryString.charCodeAt(i);
             }
 
-            // Combine with residue from previous chunk
             let combinedBytes: Uint8Array;
             if (residueRef.current) {
                 combinedBytes = new Uint8Array(residueRef.current.length + rawBytes.length);
@@ -89,7 +89,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 combinedBytes = rawBytes;
             }
 
-            // If length is odd, save the last byte for the next chunk
             if (combinedBytes.length % 2 !== 0) {
                 residueRef.current = combinedBytes.slice(-1);
                 combinedBytes = combinedBytes.slice(0, -1);
@@ -97,8 +96,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
             if (combinedBytes.length === 0) return;
 
-            // --- RAW PCM (Int16) Interpretation ---
-            // ElevenLabs pcm_16000 is 16-bit signed integer
             const int16Data = new Int16Array(combinedBytes.buffer, combinedBytes.byteOffset, combinedBytes.length / 2);
             const float32Data = new Float32Array(int16Data.length);
             for (let i = 0; i < int16Data.length; i++) {
@@ -108,14 +105,13 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             const buffer = audioContextRef.current.createBuffer(1, float32Data.length, 16000);
             buffer.getChannelData(0).set(float32Data);
 
-            // --- Gapless Scheduling ---
             const source = audioContextRef.current.createBufferSource();
             source.buffer = buffer;
             source.connect(audioContextRef.current.destination);
 
-            // Calculate start time: either immediately (plus small buffer) or exactly after previous chunk
             const now = audioContextRef.current.currentTime;
-            const startTime = Math.max(now + 0.05, nextStartTimeRef.current);
+            // ⚡ OPTIMIZATION: Reduced buffer from 0.05 to 0.02 for tighter playback
+            const startTime = Math.max(now + 0.02, nextStartTimeRef.current);
 
             source.start(startTime);
             nextStartTimeRef.current = startTime + buffer.duration;
@@ -127,36 +123,63 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     }, []);
 
     const stopPlayback = useCallback(() => {
-        // Reset scheduling
         nextStartTimeRef.current = 0;
-        // 1. Immediately stop the currently playing source
         if (activeSourceRef.current) {
             try {
                 activeSourceRef.current.stop();
-                activeSourceRef.current.disconnect(); // Disconnect to ensure silence
+                activeSourceRef.current.disconnect();
             } catch (e) {
                 console.warn("Stop playback warning:", e);
             }
             activeSourceRef.current = null;
         }
-
-        // 2. Clear the pending queue
         audioQueueRef.current = [];
         isPlayingRef.current = false;
     }, []);
 
-    // ================== MICROPHONE SETUP ==================
+    // ================== MICROPHONE SETUP & DOWNSAMPLING ==================
+
+    // Simple downsampler to ensure we send 16kHz to backend
+    const downsampleBuffer = (buffer: Float32Array, inputSampleRate: number, outputSampleRate: number) => {
+        if (outputSampleRate === inputSampleRate) {
+            return buffer;
+        }
+        const sampleRateRatio = inputSampleRate / outputSampleRate;
+        const newLength = Math.round(buffer.length / sampleRateRatio);
+        const result = new Float32Array(newLength);
+        let offsetResult = 0;
+        let offsetBuffer = 0;
+
+        while (offsetResult < result.length) {
+            const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+
+            // Simple linear accumulation (averaging) prevents aliasing better than just skipping
+            let accum = 0, count = 0;
+            for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                accum += buffer[i];
+                count++;
+            }
+            result[offsetResult] = count > 0 ? accum / count : 0;
+
+            offsetResult++;
+            offsetBuffer = nextOffsetBuffer;
+        }
+        return result;
+    };
+
     const startMicrophone = useCallback(async (startMuted: boolean = false) => {
         try {
             const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
 
             if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+                // Try to request 16kHz, but browser might ignore it
                 audioContextRef.current = new AudioContext({ sampleRate: 16000 });
             } else if (audioContextRef.current.state === 'suspended') {
                 await audioContextRef.current.resume();
             }
 
-            console.log(`🎙️ Starting Microphone... (Muted: ${startMuted})`);
+            const actualSampleRate = audioContextRef.current.sampleRate;
+            console.log(`🎙️ Microphone Setup: Context running at ${actualSampleRate}Hz (Target: 16000Hz)`);
 
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
@@ -164,16 +187,14 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true,
+                    // We request 16k, but must handle fallback
                     sampleRate: 16000
                 }
             });
             streamRef.current = stream;
 
-            // Set initial mute state on the tracks
             if (startMuted) {
-                stream.getAudioTracks().forEach(track => {
-                    track.enabled = false;
-                });
+                stream.getAudioTracks().forEach(track => { track.enabled = false; });
                 setIsMuted(true);
             } else {
                 setIsMuted(false);
@@ -185,21 +206,21 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
             processor.onaudioprocess = (e) => {
                 if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-
-                // Block audio transmission if we are waiting for greeting completion OR manually muted
-                if (greetingInProgressRef.current) return;
-
-                // Track enabled check is safer for actual transmission
                 if (streamRef.current && !streamRef.current.getAudioTracks()[0]?.enabled) return;
 
                 const inputData = e.inputBuffer.getChannelData(0);
-                // Convert Float32 to Int16 for backend
-                const int16Data = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    const s = Math.max(-1, Math.min(1, inputData[i]));
+
+                // ⚡ CORE FIX: Downsample if necessary
+                const downsampledData = downsampleBuffer(inputData, actualSampleRate, 16000);
+
+                // Convert Float32 to Int16
+                const int16Data = new Int16Array(downsampledData.length);
+                for (let i = 0; i < downsampledData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, downsampledData[i]));
                     int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                 }
-                wsRef.current.send(int16Data.buffer);
+
+                wsRef.current.send(int16Data);
             };
 
             source.connect(processor);
@@ -245,7 +266,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
                 switch (message.type) {
                     case 'simulation_started':
-                        console.log("🚀 Simulation Started Event Received via Audio Socket");
                         if (onSimulationStart) onSimulationStart();
                         break;
 
@@ -257,14 +277,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                     case 'intro_stop':
                         console.log("👋 AI Greeting Finished");
                         setGreetingState(false);
-                        // Ensure mic is unmuted if we were in greeting flow
-                        if (streamRef.current) {
-                            streamRef.current.getAudioTracks().forEach(track => {
-                                track.enabled = true;
-                            });
-                            setIsMuted(false);
-                            console.log("🔓 Microphone Unmuted");
-                        }
                         break;
 
                     case 'stt_final':
@@ -284,7 +296,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         break;
 
                     case 'tts_start':
-                        // If a new TTS starts, ensure any old audio is cleared
                         stopPlayback();
                         if (onTtsStart && message.text) onTtsStart(message.emotion || 'neutral', message.text);
                         break;
@@ -294,44 +305,46 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         break;
 
                     case 'audio_end':
-                        console.log("✅ Audio stream signal received. Waiting for buffer to clear...");
-
-                        // --- Playback-Aware Unmuting ---
-                        // nextStartTimeRef.current is the timestamp when the last scheduled chunk will finish.
-                        // We wait until that time before releasing the mic.
                         const now = audioContextRef.current?.currentTime || 0;
                         const remainingTimeMs = Math.max(0, (nextStartTimeRef.current - now) * 1000);
-
-                        console.log(`⏳ Unmuting in ${remainingTimeMs.toFixed(0)}ms (at completion of buffered audio)`);
-
                         setTimeout(() => {
-                            // Greeting Flow Check:
-                            if (greetingInProgressRef.current) {
-                                console.log("📢 Greeting complete. Releasing microphone stream.");
-                                setGreetingState(false);
-
-                                // Auto-unmute
-                                if (streamRef.current) {
-                                    streamRef.current.getAudioTracks().forEach(track => {
-                                        track.enabled = true;
-                                    });
-                                    setIsMuted(false);
-                                    console.log("🔓 Microphone Unmuted");
-                                }
-                            }
-
+                            if (greetingInProgressRef.current) setGreetingState(false);
                             if (options.onAudioEnd) options.onAudioEnd();
                         }, remainingTimeMs);
                         break;
 
                     case 'tts_interrupted':
-                        console.log("⚡ Barge-in detected (Client)! Stopping playback.");
                         stopPlayback();
                         if (onTtsInterrupted) onTtsInterrupted();
                         break;
 
+                    case 'bot_thinking':
+                        setIsThinking(true);
+                        if (onThinking) onThinking(true);
+                        break;
+
+                    case 'bot_speaking':
+                        setIsThinking(false);
+                        setIsSpeaking(true);
+                        if (onThinking) onThinking(false);
+                        if (onSpeaking) onSpeaking(true);
+                        break;
+
+                    case 'bot_stopped':
+                        setIsSpeaking(false);
+                        if (onSpeaking) onSpeaking(false);
+                        break;
+
+                    case 'user_activity':
+                        // If user starts talking, bot should stop thinking/speaking instantly
+                        setIsThinking(false);
+                        setIsSpeaking(false);
+                        if (onThinking) onThinking(false);
+                        if (onSpeaking) onSpeaking(false);
+                        stopPlayback();
+                        break;
+
                     case 'error':
-                        console.error("Server Error:", message.message);
                         if (onError && message.message) onError(new Error(message.message));
                         break;
                 }
@@ -346,7 +359,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         wsRef.current?.close();
         wsRef.current = null;
         setIsConnected(false);
-    }, []); // stopCall is dependent, but we define it below
+    }, []);
 
     const [isMuted, setIsMuted] = useState(false);
 
@@ -364,51 +377,36 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
     const stopCall = useCallback(() => {
         console.log("☎️ Ending Call");
-
-        // Notify backend of session end
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: "session_end" }));
         }
-
         streamRef.current?.getTracks().forEach(t => t.stop());
         streamRef.current = null;
-
         if (processorRef.current) {
             processorRef.current.disconnect();
             processorRef.current = null;
         }
-
-        // Clear any audio currently playing
         stopPlayback();
         setIsCallActive(false);
-        setGreetingState(false); // Reset greeting state
-        setIsMuted(false); // Reset mute state
+        setGreetingState(false);
+        setIsMuted(false);
     }, [stopPlayback]);
 
-    // Call start trigger
     const startCall = useCallback(async (sessionId?: string) => {
         if (isCallActive || greetingInProgress) return;
-
-        // Propagate Session ID to Backend
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             if (sessionId) {
-                console.log(`🆔 Configured Session: ${sessionId}`);
                 wsRef.current.send(JSON.stringify({
                     type: "session_config",
                     sessionId: sessionId
                 }));
             }
-
-            // Start Greeting Flow
-            // Initializing microphone IMMEDIATELY but MUTED to maintain "call" state persistence
-            console.log("⏳ Starting Call: Starting muted microphone, waiting for AI Greeting...");
+            console.log("⏳ Starting Call: Microphone active immediately.");
             setGreetingState(true);
-            await startMicrophone(true); // START MUTED
+            await startMicrophone(false); // Starts unmuted
         }
     }, [isCallActive, greetingInProgress, startMicrophone]);
 
-
-    // Cleanup on unmount
     useEffect(() => {
         return () => {
             stopCall();
@@ -419,7 +417,9 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     return {
         isConnected,
         isCallActive,
-        greetingInProgress, // EXPOSE THIS
+        greetingInProgress,
+        isThinking,
+        isSpeaking,
         isMuted,
         connect,
         disconnect,

@@ -34,7 +34,7 @@ export default function DashboardPage() {
     onTranscription: (text) => {
       console.log("📝 User:", text);
       setCurrentTranscript(text);
-      setAssistantState("Thinking"); // User finished speaking (stt_final)
+      // setAssistantState("Thinking") is now redundant as onThinking will handle it
     },
 
     onBackendResponse: (text, emotion, telemetry, actions) => {
@@ -56,7 +56,7 @@ export default function DashboardPage() {
 
     onTtsStart: (emotion, text) => {
       console.log("🗣️ TTS Start");
-      setAssistantState("Speaking");
+      // setAssistantState("Speaking") is now redundant as onSpeaking will handle it
       setCurrentTranscript(text);
     },
 
@@ -75,6 +75,16 @@ export default function DashboardPage() {
       console.log("⚡ Interrupted");
       setAssistantState("Listening");
       setCurrentTranscript("");
+    },
+
+    onThinking: (isThinking) => {
+      if (isThinking) setAssistantState("Thinking");
+      else if (assistantState === "Thinking") setAssistantState("Listening");
+    },
+
+    onSpeaking: (isSpeaking) => {
+      if (isSpeaking) setAssistantState("Speaking");
+      else if (assistantState === "Speaking") setAssistantState("Listening");
     },
 
     onSimulationStart: () => { // NEW
@@ -106,7 +116,7 @@ export default function DashboardPage() {
   const handleStartCall = () => {
     const sessionId = crypto.randomUUID();
     console.log("Starting Call with Session ID:", sessionId);
-    setAssistantState("Thinking"); // Started Thinking immediately
+    // setAssistantState("Thinking"); // Redundant
     startCall(sessionId);
   };
 
