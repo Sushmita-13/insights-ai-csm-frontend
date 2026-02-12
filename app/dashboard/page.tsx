@@ -4,20 +4,10 @@ import { useWebSocketAudio } from "@/lib/useWebSocketAudio";
 import { VoiceAssistant } from "@/components/VoiceAssistant";
 import { PlantDashboard } from "@/components/plant/plant-dashboard";
 
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
-  emotion?: string;
-  telemetry?: any;
-  actions?: string[];
-}
-
 export default function DashboardPage() {
-  const [messages, setMessages] = useState<Message[]>([]);
   // 'Idle' | 'Connected' | 'Listening' | 'Speaking' | 'Processing' | 'Waiting for AI...'
   const [assistantState, setAssistantState] = useState<string>("Idle");
-  const [currentTranscript, setCurrentTranscript] = useState("");
-  const [simulationActive, setSimulationActive] = useState(false); // NEW: Simulation State
+  const [simulationActive, setSimulationActive] = useState(false);
 
   const {
     isConnected,
@@ -27,27 +17,20 @@ export default function DashboardPage() {
     stopCall,
     isMuted,
     toggleMute,
-    greetingInProgress // Exposed from hook
+    greetingInProgress,
+    messages, // ⚡ Get messages directly from the hook
   } = useWebSocketAudio({
     wsUrl: 'ws://localhost:8000/ws/query',
 
     onTranscription: (text) => {
       console.log("📝 User:", text);
-      setCurrentTranscript(text);
-      // setAssistantState("Thinking") is now redundant as onThinking will handle it
+      // setAssistantState("Thinking") is handled by onThinking
     },
 
     onBackendResponse: (text, emotion, telemetry, actions) => {
       console.log("🤖 AI:", text);
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: text,
-        emotion,
-        telemetry,
-        actions
-      }]);
 
-      // Fallback: Also check actions array for simulation start
+      // Check actions for simulation start
       if (actions?.includes("Started Plant Simulation")) {
         console.log("🚀 Simulation Start detected in actions array");
         setSimulationActive(true);
@@ -56,8 +39,6 @@ export default function DashboardPage() {
 
     onTtsStart: (emotion, text) => {
       console.log("🗣️ TTS Start");
-      // setAssistantState("Speaking") is now redundant as onSpeaking will handle it
-      setCurrentTranscript(text);
     },
 
     // Fallback if no TTS start event
@@ -67,14 +48,12 @@ export default function DashboardPage() {
 
     onAudioEnd: () => {
       console.log("✅ Audio End");
-      setAssistantState("Listening"); // Go back to listening after speaking
-      setCurrentTranscript("");
+      setAssistantState("Listening");
     },
 
     onTtsInterrupted: () => {
       console.log("⚡ Interrupted");
       setAssistantState("Listening");
-      setCurrentTranscript("");
     },
 
     onThinking: (isThinking) => {
@@ -87,7 +66,7 @@ export default function DashboardPage() {
       else if (assistantState === "Speaking") setAssistantState("Listening");
     },
 
-    onSimulationStart: () => { // NEW
+    onSimulationStart: () => {
       console.log("🚀 Simulation Started (Dashboard Update)");
       setSimulationActive(true);
     },
@@ -97,52 +76,44 @@ export default function DashboardPage() {
     }
   });
 
-  // Auto-connect on mount
-  useEffect(() => {
-    connect();
-  }, []);
+  // Auto-connect removed to prevent premature connection logic
+  // useEffect(() => { connect(); }, []); 
 
   // Sync state when call starts/stops
   useEffect(() => {
     if (!isCallActive && !greetingInProgress) {
       setAssistantState("Idle");
-      setCurrentTranscript("");
-    } else if (isCallActive && !greetingInProgress) {
-      // Normal state
-      // setAssistantState("Listening"); // Handled by onAudioEnd usually
     }
   }, [isCallActive, greetingInProgress]);
 
   const handleStartCall = () => {
     const sessionId = crypto.randomUUID();
     console.log("Starting Call with Session ID:", sessionId);
-    // setAssistantState("Thinking"); // Redundant
     startCall(sessionId);
   };
 
   return (
     <main className="h-screen w-screen bg-slate-950 flex flex-col overflow-hidden text-slate-100">
 
-      {/* Header - Compact */}
+      {/* Header */}
       <header className="flex-none p-4 flex justify-between items-center bg-slate-900/50 backdrop-blur border-b border-slate-800 h-16">
         <div>
           <h1 className="text-xl font-bold text-white leading-none">InsightsAI Plant Monitor</h1>
           <p className="text-slate-400 text-xs text-opacity-80">Real-time Digital Twin & Voice Assistant</p>
         </div>
-        {/* You could add status indicators here if needed */}
       </header>
 
-      {/* Main Content - Flex Row for Desktop */}
+      {/* Main Content */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
 
-        {/* Left Panel: Voice Assistant (Fixed Width on large screens) */}
+        {/* Left Panel: Voice Assistant */}
         <div className="flex-none lg:w-[400px] bg-slate-900/30 p-4 border-b lg:border-b-0 lg:border-r border-slate-800 overflow-y-auto custom-scrollbar">
           <div className="h-full flex flex-col justify-center">
             <VoiceAssistant
               isConnected={isConnected}
-              isCallActive={isCallActive || greetingInProgress} // Ensure UI shows active during greeting
+              isCallActive={isCallActive || greetingInProgress}
               serverStatus={assistantState}
-              transcript={currentTranscript}
+              messages={messages} // ⚡ FIX: Passing the messages array correctly
               onStartCall={handleStartCall}
               onEndCall={stopCall}
               isMuted={isMuted}
@@ -151,7 +122,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Right Panel: Simulation Dashboard (Takes remaining space) */}
+        {/* Right Panel: Simulation Dashboard */}
         <div className="flex-1 p-4 bg-slate-950/50 overflow-hidden relative">
           <div className="h-full w-full">
             <PlantDashboard simulationActive={simulationActive} />
