@@ -18,6 +18,7 @@ interface UseWebSocketAudioOptions {
     onTtsStart?: (emotion: string, text: string) => void;
     onTtsInterrupted?: () => void;
     onSimulationStart?: () => void;
+    onEvaluationReport?: (report: string) => void; // ⚡ NEW: Added evaluation report callback
     onThinking?: (isThinking: boolean) => void;
     onSpeaking?: (isSpeaking: boolean) => void;
     onError?: (error: Error) => void;
@@ -31,6 +32,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         onTtsStart,
         onTtsInterrupted,
         onSimulationStart,
+        onEvaluationReport, // ⚡ Extracted
         onThinking,
         onSpeaking,
         onError,
@@ -277,6 +279,11 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                     case 'simulation_started':
                         if (onSimulationStart) onSimulationStart();
                         break;
+                    case 'evaluation_report': // ⚡ NEW: Handle incoming report
+                        if (onEvaluationReport && message.report) {
+                            onEvaluationReport(message.report);
+                        }
+                        break;
                     case 'intro_start':
                         setGreetingState(true);
                         // ⚡ Reset audio block for greeting
@@ -361,7 +368,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 console.error("WS Parse Error:", e);
             }
         };
-    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onSimulationStart, onError, queueAudioChunk, stopPlayback, options, startMicrophone]);
+    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onSimulationStart, onEvaluationReport, onError, queueAudioChunk, stopPlayback, options, startMicrophone]);
 
     const disconnect = useCallback(() => {
         stopCall();
