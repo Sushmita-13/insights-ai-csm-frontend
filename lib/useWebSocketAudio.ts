@@ -18,7 +18,7 @@ interface UseWebSocketAudioOptions {
     onTtsStart?: (emotion: string, text: string) => void;
     onTtsInterrupted?: () => void;
     onSimulationStart?: () => void;
-    onEvaluationReport?: (report: string) => void; // ⚡ NEW: Added evaluation report callback
+    onEvaluationReport?: (report: string) => void;
     onThinking?: (isThinking: boolean) => void;
     onSpeaking?: (isSpeaking: boolean) => void;
     onError?: (error: Error) => void;
@@ -32,7 +32,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         onTtsStart,
         onTtsInterrupted,
         onSimulationStart,
-        onEvaluationReport, // ⚡ Extracted
+        onEvaluationReport,
         onThinking,
         onSpeaking,
         onError,
@@ -54,6 +54,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
     // State
     const [isConnected, setIsConnected] = useState(false);
+    const [isConnecting, setIsConnecting] = useState(false); // ⚡ NEW: Connection state
     const [isCallActive, setIsCallActive] = useState(false);
     const [greetingInProgress, setGreetingInProgress] = useState(false);
     const [isThinking, setIsThinking] = useState(false);
@@ -209,6 +210,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             processorRef.current = processor;
 
             processor.onaudioprocess = (e) => {
+                // ⚡ Only send audio if fully active (not just connecting)
                 if (wsRef.current?.readyState !== WebSocket.OPEN) return;
                 if (streamRef.current && !streamRef.current.getAudioTracks()[0]?.enabled) return;
 
@@ -227,8 +229,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
             source.connect(processor);
             processor.connect(audioContextRef.current.destination);
 
-            setIsCallActive(true);
-
         } catch (err) {
             console.error("Microphone Error:", err);
             setIsCallActive(false);
@@ -240,27 +240,29 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     const connect = useCallback(() => {
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
+        // ⚡ Set connecting state true immediately
+        setIsConnecting(true);
+
         wsRef.current = new WebSocket(wsUrl);
 
         wsRef.current.onopen = async () => {
             console.log('✅ WebSocket connected');
             setIsConnected(true);
+            // ⚡ NOTE: We do NOT set isCallActive=true or start Microphone here anymore.
+            // We wait for the 'pipeline_ready' message from the backend.
 
             if (pendingSessionIdRef.current) {
                 wsRef.current?.send(JSON.stringify({
                     type: "session_config",
                     sessionId: pendingSessionIdRef.current
                 }));
-                setGreetingState(true);
-                // ⚡ Allow greeting audio
-                ignoreAudioRef.current = false;
-                await startMicrophone(false);
                 pendingSessionIdRef.current = null;
             }
         };
 
         wsRef.current.onclose = () => {
             setIsConnected(false);
+            setIsConnecting(false); // ⚡ Stop connecting state
             setIsCallActive(false);
             pendingSessionIdRef.current = null;
         };
@@ -268,25 +270,38 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         wsRef.current.onerror = (error) => {
             console.error('WebSocket Error:', error);
             setIsConnected(false);
+            setIsConnecting(false); // ⚡ Stop connecting state
             if (onError) onError(new Error('WebSocket connection failed'));
         };
 
-        wsRef.current.onmessage = (event) => {
+        wsRef.current.onmessage = async (event) => { // ⚡ Async for startMicrophone
             try {
                 const message: any = JSON.parse(event.data);
 
                 switch (message.type) {
+                    case 'pipeline_initializing':
+                        // ⚡ Backend is starting up services
+                        setIsConnecting(true);
+                        break;
+                    case 'pipeline_ready':
+                        // ⚡ Backend is ready. Now we start the call officially.
+                        console.log("🚀 Pipeline Ready. Starting Audio...");
+                        setIsConnecting(false);
+                        setIsCallActive(true);
+                        setGreetingState(true);
+                        ignoreAudioRef.current = false;
+                        await startMicrophone(false);
+                        break;
                     case 'simulation_started':
                         if (onSimulationStart) onSimulationStart();
                         break;
-                    case 'evaluation_report': // ⚡ NEW: Handle incoming report
+                    case 'evaluation_report':
                         if (onEvaluationReport && message.report) {
                             onEvaluationReport(message.report);
                         }
                         break;
                     case 'intro_start':
                         setGreetingState(true);
-                        // ⚡ Reset audio block for greeting
                         ignoreAudioRef.current = false;
                         break;
                     case 'intro_stop':
@@ -313,14 +328,11 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         }
                         break;
                     case 'tts_start':
-                        // ⚡ FIX 2: New TTS turn starts. Clear residue, UNBLOCK audio.
                         stopPlayback();
                         ignoreAudioRef.current = false;
-
                         if (onTtsStart && message.text) onTtsStart(message.emotion || 'neutral', message.text);
                         break;
                     case 'audio':
-                        // ⚡ FIX 2: Check flag before queueing
                         if (!ignoreAudioRef.current && message.data) queueAudioChunk(message.data);
                         break;
                     case 'audio_end':
@@ -332,7 +344,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         }, remainingTimeMs);
                         break;
                     case 'tts_interrupted':
-                        // ⚡ FIX 2: Interrupted! Kill audio, BLOCK subsequent packets.
                         stopPlayback();
                         ignoreAudioRef.current = true;
                         if (onTtsInterrupted) onTtsInterrupted();
@@ -352,7 +363,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         if (onSpeaking) onSpeaking(false);
                         break;
                     case 'user_activity':
-                        // ⚡ FIX 2: User started speaking! Kill audio, BLOCK packets.
                         setIsThinking(false);
                         setIsSpeaking(false);
                         if (onThinking) onThinking(false);
@@ -361,6 +371,8 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         ignoreAudioRef.current = true;
                         break;
                     case 'error':
+                        // ⚡ Stop connecting state on error
+                        setIsConnecting(false);
                         if (onError && message.message) onError(new Error(message.message));
                         break;
                 }
@@ -375,6 +387,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         wsRef.current?.close();
         wsRef.current = null;
         setIsConnected(false);
+        setIsConnecting(false);
     }, []);
 
     const toggleMute = useCallback(() => {
@@ -402,6 +415,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         }
         stopPlayback();
         setIsCallActive(false);
+        setIsConnecting(false); // ⚡ Ensure connecting state is cleared
         setGreetingState(false);
         setIsMuted(false);
         setMessages([]);
@@ -409,8 +423,9 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
     }, [stopPlayback]);
 
     const startCall = useCallback(async (sessionId: string = "default") => {
-        if (isCallActive || greetingInProgress) return;
+        if (isCallActive || greetingInProgress || isConnecting) return; // ⚡ Check isConnecting
 
+        setIsConnecting(true); // ⚡ Immediate feedback
         pendingSessionIdRef.current = sessionId;
 
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -420,12 +435,15 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 type: "session_config",
                 sessionId: sessionId
             }));
-            setGreetingState(true);
-            ignoreAudioRef.current = false;
-            await startMicrophone(false);
-            pendingSessionIdRef.current = null;
+            // ⚡ Do NOT set active here; wait for pipeline_ready msg
+            // However, if the socket is already open and ready, we should arguably wait for acknowledgment 
+            // or we might need to assume it's ready if the backend doesn't send ready signal on reconfiguration.
+            // For now, let's assume a fresh connection flow for safety or that backend sends ready signal on re-config.
+            // But if existing connection, backend might not resend pipeline_ready.
+            // If the connection was kept open, we might need to handle this.
+            // Given the stopCall closes the socket, we usually reconnect.
         }
-    }, [isCallActive, greetingInProgress, connect, startMicrophone]);
+    }, [isCallActive, greetingInProgress, isConnecting, connect]);
 
     useEffect(() => {
         return () => {
@@ -435,12 +453,13 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
 
     return {
         isConnected,
+        isConnecting, // ⚡ Return new state
         isCallActive,
         greetingInProgress,
         isThinking,
         isSpeaking,
         isMuted,
-        messages, // ⚡ Returns chat history
+        messages,
         connect,
         disconnect,
         startCall,

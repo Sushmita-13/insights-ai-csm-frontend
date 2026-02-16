@@ -12,6 +12,7 @@ export default function DashboardPage() {
 
   const {
     isConnected,
+    isConnecting,
     isCallActive,
     connect,
     startCall,
@@ -19,7 +20,7 @@ export default function DashboardPage() {
     isMuted,
     toggleMute,
     greetingInProgress,
-    messages, // ⚡ Get messages directly from the hook
+    messages,
   } = useWebSocketAudio({
     wsUrl: 'ws://localhost:8000/ws/query',
 
@@ -130,6 +131,7 @@ export default function DashboardPage() {
           <div className="h-full flex flex-col justify-center">
             <VoiceAssistant
               isConnected={isConnected}
+              isConnecting={isConnecting}
               isCallActive={isCallActive || greetingInProgress}
               serverStatus={assistantState}
               messages={messages}
