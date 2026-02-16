@@ -3,12 +3,15 @@ import { useState, useEffect } from "react";
 import { useWebSocketAudio } from "@/lib/useWebSocketAudio";
 import { VoiceAssistant } from "@/components/VoiceAssistant";
 import { PlantDashboard } from "@/components/plant/plant-dashboard";
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 export default function DashboardPage() {
   // 'Idle' | 'Connected' | 'Listening' | 'Speaking' | 'Processing' | 'Waiting for AI...'
   const [assistantState, setAssistantState] = useState<string>("Idle");
   const [simulationActive, setSimulationActive] = useState(false);
-  const [evaluationReport, setEvaluationReport] = useState<string | null>(null); // ⚡ NEW: Evaluation Report State
+  const [evaluationReportData, setEvaluationReportData] = useState<string | null>(null);
+  const [showEvaluationReport, setShowEvaluationReport] = useState(false);
 
   const {
     isConnected,
@@ -39,10 +42,17 @@ export default function DashboardPage() {
       }
     },
 
-    onEvaluationReport: (report) => {
-      console.log("📊 Received Evaluation Report");
-      setEvaluationReport(report); // Save report text to state
-      setSimulationActive(false); // Make sure the simulation view knows it's over
+    // ⚡ NEW: Two-step evaluation handling
+    onEvaluationData: (report) => {
+      console.log("📊 Received Evaluation Data");
+      setEvaluationReportData(report); // Store data
+      // Don't show yet
+    },
+
+    onEvaluationTtsStarted: () => {
+      console.log("🗣️ Evaluation TTS Started - Showing Report");
+      setShowEvaluationReport(true); // Now show the report
+      setSimulationActive(false);
     },
 
     onTtsStart: (emotion, text) => {
@@ -93,7 +103,7 @@ export default function DashboardPage() {
 
   const handleStartCall = () => {
     // Clear old report if starting a new call
-    if (evaluationReport) {
+    if (evaluationReportData) {
       handleRestartSimulation();
     }
     const sessionId = crypto.randomUUID();
@@ -108,7 +118,8 @@ export default function DashboardPage() {
     } catch (err) {
       console.error("Failed to reset backend simulation", err);
     }
-    setEvaluationReport(null);
+    setEvaluationReportData(null);
+    setShowEvaluationReport(false);
     setSimulationActive(false);
   };
 
@@ -146,8 +157,8 @@ export default function DashboardPage() {
         {/* Right Panel: Simulation Dashboard OR Evaluation Report */}
         <div className="flex-1 p-4 bg-slate-950/50 overflow-hidden relative">
           <div className="h-full w-full">
-            {evaluationReport ? (
-              // ⚡ NEW: Evaluation Report View
+            {showEvaluationReport && evaluationReportData ? (
+              // ⚡ NEW: Evaluation Report View with Markdown
               <div className="h-full flex flex-col bg-slate-900 rounded-lg border border-slate-800 p-6 overflow-y-auto custom-scrollbar">
                 <div className="flex justify-between items-center mb-6 border-b border-slate-700 pb-4">
                   <h2 className="text-2xl font-bold text-white">Simulation Complete</h2>
@@ -159,8 +170,32 @@ export default function DashboardPage() {
                   </button>
                 </div>
 
-                <div className="text-slate-300 whitespace-pre-wrap text-base leading-relaxed mb-6 font-sans">
-                  {evaluationReport}
+                <div className="prose prose-invert prose-slate max-w-none">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      h1: ({ node, ...props }) => <h1 className="text-3xl font-bold text-white mb-4 border-b border-slate-700 pb-2" {...props} />,
+                      h2: ({ node, ...props }) => <h2 className="text-2xl font-semibold text-white mb-3 mt-6" {...props} />,
+                      h3: ({ node, ...props }) => <h3 className="text-xl font-semibold text-slate-200 mb-2 mt-4" {...props} />,
+                      p: ({ node, ...props }) => <p className="text-slate-300 mb-3 leading-relaxed" {...props} />,
+                      ul: ({ node, ...props }) => <ul className="list-disc list-inside text-slate-300 mb-3 space-y-1" {...props} />,
+                      ol: ({ node, ...props }) => <ol className="list-decimal list-inside text-slate-300 mb-3 space-y-1" {...props} />,
+                      li: ({ node, ...props }) => <li className="ml-4" {...props} />,
+                      strong: ({ node, ...props }) => <strong className="text-white font-semibold" {...props} />,
+                      em: ({ node, ...props }) => <em className="text-slate-200 italic" {...props} />,
+                      code: ({ node, inline, ...props }: any) =>
+                        inline
+                          ? <code className="bg-slate-800 text-blue-300 px-1.5 py-0.5 rounded text-sm" {...props} />
+                          : <code className="block bg-slate-800 text-slate-200 p-3 rounded my-2 overflow-x-auto" {...props} />,
+                      hr: ({ node, ...props }) => <hr className="border-slate-700 my-6" {...props} />,
+                      blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-blue-500 pl-4 italic text-slate-400 my-3" {...props} />,
+                      table: ({ node, ...props }) => <table className="w-full border-collapse border border-slate-700 my-4" {...props} />,
+                      th: ({ node, ...props }) => <th className="border border-slate-700 bg-slate-800 px-3 py-2 text-left font-semibold text-white" {...props} />,
+                      td: ({ node, ...props }) => <td className="border border-slate-700 px-3 py-2 text-slate-300" {...props} />,
+                    }}
+                  >
+                    {evaluationReportData}
+                  </ReactMarkdown>
                 </div>
               </div>
             ) : (

@@ -18,7 +18,9 @@ interface UseWebSocketAudioOptions {
     onTtsStart?: (emotion: string, text: string) => void;
     onTtsInterrupted?: () => void;
     onSimulationStart?: () => void;
-    onEvaluationReport?: (report: string) => void;
+    onEvaluationReport?: (report: string) => void; // Kept for backward compat
+    onEvaluationData?: (report: string) => void;    // ⚡ NEW
+    onEvaluationTtsStarted?: () => void;            // ⚡ NEW
     onThinking?: (isThinking: boolean) => void;
     onSpeaking?: (isSpeaking: boolean) => void;
     onError?: (error: Error) => void;
@@ -33,6 +35,8 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
         onTtsInterrupted,
         onSimulationStart,
         onEvaluationReport,
+        onEvaluationData,
+        onEvaluationTtsStarted,
         onThinking,
         onSpeaking,
         onError,
@@ -296,8 +300,21 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                         if (onSimulationStart) onSimulationStart();
                         break;
                     case 'evaluation_report':
+                        // Backward compatibility
                         if (onEvaluationReport && message.report) {
                             onEvaluationReport(message.report);
+                        }
+                        break;
+                    case 'evaluation_data':
+                        // ⚡ NEW: Store data but don't show yet
+                        if (onEvaluationData && message.report) {
+                            onEvaluationData(message.report);
+                        }
+                        break;
+                    case 'evaluation_tts_started':
+                        // ⚡ NEW: Trigger display now
+                        if (onEvaluationTtsStarted) {
+                            onEvaluationTtsStarted();
                         }
                         break;
                     case 'intro_start':
@@ -380,7 +397,7 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 console.error("WS Parse Error:", e);
             }
         };
-    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onSimulationStart, onEvaluationReport, onError, queueAudioChunk, stopPlayback, options, startMicrophone]);
+    }, [wsUrl, onTranscription, onBackendResponse, onTtsStart, onTtsInterrupted, onSimulationStart, onEvaluationReport, onEvaluationData, onEvaluationTtsStarted, onError, queueAudioChunk, stopPlayback, options, startMicrophone]);
 
     const disconnect = useCallback(() => {
         stopCall();
@@ -436,12 +453,6 @@ export const useWebSocketAudio = (options: UseWebSocketAudioOptions = {}) => {
                 sessionId: sessionId
             }));
             // ⚡ Do NOT set active here; wait for pipeline_ready msg
-            // However, if the socket is already open and ready, we should arguably wait for acknowledgment 
-            // or we might need to assume it's ready if the backend doesn't send ready signal on reconfiguration.
-            // For now, let's assume a fresh connection flow for safety or that backend sends ready signal on re-config.
-            // But if existing connection, backend might not resend pipeline_ready.
-            // If the connection was kept open, we might need to handle this.
-            // Given the stopCall closes the socket, we usually reconnect.
         }
     }, [isCallActive, greetingInProgress, isConnecting, connect]);
 
