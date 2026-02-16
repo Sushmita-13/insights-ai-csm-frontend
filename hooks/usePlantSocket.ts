@@ -19,7 +19,18 @@ export function usePlantSocket() {
 
         ws.onmessage = (event) => {
             try {
-                const data: PlantState = JSON.parse(event.data);
+                const message = JSON.parse(event.data);
+
+                // FIX: Check if this is an action confirmation event
+                // The backend now sends { type: 'action_executed', ... } events
+                if (message.type === 'action_executed') {
+                    console.log(`✅ Action confirmed: ${message.action} ${message.target || message.value}`);
+                    // Return early so we don't try to parse this as PlantState
+                    return;
+                }
+
+                // Otherwise, assume it is a PlantState update
+                const data: PlantState = message;
                 setPlantState(data);
             } catch (err) {
                 console.error('❌ Failed to parse plant state:', err);
